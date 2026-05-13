@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Session Tracking Simulator</title>
+</head>
+<body>
+  <h1>HTTP Session Tracking — Cookie Simulator</h1>
+
+  <div>
+    <button onclick="doRequest('GET /login')">GET /login</button>
+    <button onclick="doRequest('POST /login')">POST /login</button>
+    <button onclick="doRequest('GET /dashboard')">GET /dashboard</button>
+    <button onclick="doRequest('POST /transaction')">POST /transaction</button>
+    <button onclick="doRequest('POST /logout')">POST /logout</button>
+    <button onclick="resetAll()">Reset</button>
+  </div>
+
+  <p id="status">Click a request to simulate an HTTP round-trip.</p>
+
+  <b>Client — Cookie Jar</b>
+  <div id="cookie-jar"><i>No cookies yet.</i></div>
+
+  <b>Server — Session Store</b>
+  <div id="session-store"><i>No active sessions.</i></div>
+
+  <b>HTTP Request</b>
+  <div id="req-log"><i>Waiting...</i></div>
+
+  <b>HTTP Response</b>
+  <div id="res-log"><i>Waiting...</i></div>
+
+  <b>Transaction History</b>
+  <div id="txn-log"><i>No transactions yet.</i></div>
+
+  <script>
+    const state = { cookieJar: {}, sessions: {}, txnCount: 0 };
+
+    function uid() { return Math.random().toString(36).slice(2, 10).toUpperCase(); }
+    function now() { return new Date().toLocaleTimeString(); }
+
+    function renderKV(obj) {
+      const entries = Object.entries(obj);
+      if (!entries.length) return '<i>Empty.</i>';
+      return entries.map(([k, v]) =>
+        `<div><b>${k}</b>: ${typeof v === 'object' ? JSON.stringify(v) : v}</div>`
+      ).join('');
+    }
+
+    function renderSessions() {
+      const entries = Object.entries(state.sessions);
+      if (!entries.length) return '<i>No active sessions.</i>';
+      return entries.map(([sid, s]) => `
+        <div>
+          <div><b>sid</b>: ${sid}</div>
+          <div><b>user</b>: ${s.user}</div>
+          <div><b>created</b>: ${s.created}</div>
+          <div><b>txns</b>: ${s.txns}</div>
+        </div>`).join('<hr>');
+    }
+
+    function setReq(lines) {
+      document.getElementById('req-log').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+    }
+    function setRes(lines) {
+      document.getElementById('res-log').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+    }
+    function addTxn(msg) {
+      const el = document.getElementById('txn-log');
+      if (el.querySelector('i')) el.innerHTML = '';
+      el.innerHTML = `<div>[${now()}] ${msg}</div>` + el.innerHTML;
+    }
+    function setStatus(msg) { document.getElementById('status').textContent = msg; }
+    function refresh() {
+      document.getElementById('cookie-jar').innerHTML = renderKV(state.cookieJar);
+      document.getElementById('session-store').innerHTML = renderSessions();
+    }
+
+    function tag(type, text) { return `[${type}] ${text}`; }
+
+    function doRequest(action) {
+      const sid = state.cookieJar['session_id'];
+      const session = sid ? state.sessions[sid] : null;
+
+      if (action === 'GET /login') {
+        setReq([tag('REQ', 'GET /login HTTP/1.1'), 'Host: app.local', sid ? `Cookie: session_id=${sid}` : '(no cookie sent)']);
+        setRes([tag('RES', '200 OK'), 'Content-Type: text/html', '(Login page returned)']);
+        setStatus('Server returned the login page. No session created yet.');
+        refresh(); return;
+      }
+
+      if (action === 'POST /login') {
+        if (session) {
+          setReq([tag('REQ', 'POST /login HTTP/1.1'), `Cookie: session_id=${sid}`, 'body: user=dinesh&pass=***']);
+          setRes([tag('ERR', '302 Found'), 'Location: /dashboard', '(already logged in — redirect)']);
+          setStatus('Already have a valid session. Redirecting to /dashboard.');
+          refresh(); return;
+        }
+        const newSid = uid();
+        state.sessions[newSid] = { user: 'dinesh', created: now(), txns: 0 };
+        state.cookieJar['session_id'] = newSid;
+        state.cookieJar['Path'] = '/';
+        state.cookieJar['HttpOnly'] = 'true';
+        setReq([tag('REQ', 'POST /login HTTP/1.1'), 'Content-Type: application/x-www-form-urlencoded', 'body: user=dinesh&pass=***', '(no cookie sent)']);
+        setRes([tag('RES', '302 Found'), `Set-Cookie: session_id=${newSid}; Path=/; HttpOnly`, 'Location: /dashboard', '(session created, cookie set)']);
+        addTxn(`Session created → sid=${newSid}`);
+        setStatus(`Login OK. Server created session ${newSid} and issued Set-Cookie header.`);
+        refresh(); return;
+      }
+
+      if (action === 'GET /dashboard') {
+        if (!session) {
+          setReq([tag('REQ', 'GET /dashboard HTTP/1.1'), '(no session cookie)']);
+          setRes([tag('ERR', '302 Found'), 'Location: /login', '(not authenticated)']);
+          setStatus('No session cookie found. Server redirects to /login.');
+          refresh(); return;
+        }
+        setReq([tag('REQ', 'GET /dashboard HTTP/1.1'), `Cookie: session_id=${sid}`]);
+        setRes([tag('RES', '200 OK'), `X-User: ${session.user}`, '(dashboard returned)']);
+        setStatus(`Cookie sent → server looked up sid=${sid} → found user "${session.user}" → 200 OK.`);
+        refresh(); return;
+      }
+
+      if (action === 'POST /transaction') {
+        if (!session) {
+          setReq([tag('REQ', 'POST /transaction HTTP/1.1'), '(no session cookie)']);
+          setRes([tag('ERR', '401 Unauthorized'), '{"error":"not authenticated"}']);
+          setStatus('No active session. Transaction rejected with 401.');
+          refresh(); return;
+        }
+        state.txnCount++;
+        session.txns++;
+        const amount = (Math.random() * 900 + 100).toFixed(2);
+        const txnId = 'TXN-' + uid();
+        setReq([tag('REQ', 'POST /transaction HTTP/1.1'), `Cookie: session_id=${sid}`, `body: amount=${amount}&to=merchant_42`]);
+        setRes([tag('RES', '200 OK'), `{"txn_id":"${txnId}","amount":"₹${amount}","status":"success"}`]);
+        addTxn(`${txnId} — ₹${amount} by ${session.user} (session ${sid})`);
+        setStatus(`Transaction ${txnId} authorised using session ${sid}. No re-login required.`);
+        refresh(); return;
+      }
+
+      if (action === 'POST /logout') {
+        if (!session) {
+          setReq([tag('REQ', 'POST /logout HTTP/1.1'), '(nothing to log out)']);
+          setRes([tag('ERR', '400 Bad Request'), '{"error":"no session"}']);
+          setStatus('No session to destroy.');
+          refresh(); return;
+        }
+        delete state.sessions[sid];
+        setReq([tag('REQ', 'POST /logout HTTP/1.1'), `Cookie: session_id=${sid}`]);
+        setRes([tag('RES', '200 OK'), `Set-Cookie: session_id=; Max-Age=0; Path=/`, '(session destroyed, cookie cleared)']);
+        addTxn(`Session ${sid} destroyed (logout)`);
+        delete state.cookieJar['session_id'];
+        delete state.cookieJar['Path'];
+        delete state.cookieJar['HttpOnly'];
+        setStatus(`Session ${sid} deleted from server store. Cookie cleared via Max-Age=0.`);
+        refresh(); return;
+      }
+    }
+
+    function resetAll() {
+      state.cookieJar = {};
+      state.sessions = {};
+      state.txnCount = 0;
+      document.getElementById('req-log').innerHTML = '<i>Waiting...</i>';
+      document.getElementById('res-log').innerHTML = '<i>Waiting...</i>';
+      document.getElementById('txn-log').innerHTML = '<i>No transactions yet.</i>';
+      setStatus('Reset. Start fresh with GET /login.');
+      refresh();
+    }
+
+    refresh();
+  </script>
+</body>
+</html>
